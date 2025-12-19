@@ -1,15 +1,46 @@
 import os
 import shutil
 import uuid
+import requests
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, FileResponse
 from detector import AutonomousDecisionSystem
 
-app = FastAPI()
+# --- DYNAMIC CONFIGURATION ---
+# Replace this with your actual GitHub Release download link
+MODEL_URL = "https://github.com/dhritibr/Ai-in-Autonomous-Vehicles/releases/download/v1.0.0/best.pt"
 
-# Enhanced CORS for portability across different laptop IPs
+# Detect if running on Vercel or Local laptop
+is_cloud = "VERCEL" in os.environ
+base_dir = "/tmp" if is_cloud else "."
+MODEL_PATH = os.path.join(base_dir, "best.pt")
+
+def download_model_if_needed():
+    """Downloads the YOLO model if it doesn't exist in the current environment."""
+    if not os.path.exists(MODEL_PATH):
+        print(f"📥 Downloading model from GitHub to {MODEL_PATH}...")
+        try:
+            response = requests.get(MODEL_URL, stream=True, timeout=30)
+            response.raise_for_status()
+            with open(MODEL_PATH, 'wb') as f:
+                shutil.copyfileobj(response.raw, f)
+            print("✅ Model download complete.")
+        except Exception as e:
+            print(f"❌ Failed to download model: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This logic runs on server startup
+    download_model_if_needed()
+    yield
+
+# Initialize FastAPI with the lifespan event
+app = FastAPI(lifespan=lifespan)
+
+# Allow all origins for maximum portability across different laptop IPs
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,21 +49,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Use /tmp for cloud deployment (Vercel) but keep local folders for laptops
-# This detects if it's running in a cloud environment
-is_cloud = "VERCEL" in os.environ
-base_dir = "/tmp" if is_cloud else "."
-
+# Setup temporary storage paths
 UPLOAD_DIR = os.path.join(base_dir, "uploads")
 OUTPUT_DIR = os.path.join(base_dir, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Mount the output directory so processed images/videos can be viewed
+# Serve the processed output files
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
-# Initialize the system. Ensure best.pt is in the root folder
-system = AutonomousDecisionSystem(model_path="best.pt")
+# Initialize the AI detector system
+system = AutonomousDecisionSystem(model_path=MODEL_PATH)
 
 processing_status = {
     "is_processing": False, 
@@ -42,15 +69,15 @@ processing_status = {
 }
 
 # --- FRONTEND ROUTES ---
-# These allow Python to serve your HTML directly
+
 @app.get("/")
 async def serve_landing():
-    # Looks for landing.html in the same folder as main.py
+    # Serves the landing page at http://localhost:8000
     return FileResponse("landing.html")
 
 @app.get("/index.html")
 async def serve_app():
-    # Looks for index.html in the same folder as main.py
+    # Serves the main application page
     return FileResponse("index.html")
 
 # --- API ENDPOINTS ---
@@ -71,7 +98,7 @@ async def process_media_endpoint(file: UploadFile = File(...)):
             output_path = os.path.join(OUTPUT_DIR, output_filename)
             processing_status.update({"is_processing": True, "progress": 0, "current_frame": 0})
             
-            # Process the video using the detector logic
+            # Run YOLO detection logic from detector.py
             final_decision = system.process_video(input_path, output_path, processing_status)
             
             processing_status.update({"is_processing": False, "progress": 100})
@@ -98,7 +125,7 @@ def get_processing_progress():
 
 @app.get("/video_feed")
 def video_feed():
-    # Live webcam feed logic from detector.py
+    # Streams live frames from the detector
     return StreamingResponse(system.generate_frames(), 
                              media_type='multipart/x-mixed-replace; boundary=frame')
 
@@ -113,6 +140,6 @@ def get_current_status():
 
 if __name__ == "__main__":
     import uvicorn
-    # 0.0.0.0 makes the server accessible to other laptops on the same Wi-Fi
+    # Open to 0.0.0.0 so other laptops on Wi-Fi can connect
     print("🚀 Server Ready. Go to http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
