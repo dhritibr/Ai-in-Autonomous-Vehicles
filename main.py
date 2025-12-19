@@ -4,11 +4,12 @@ import uuid
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import StreamingResponse, FileResponse # Required for frontend
+from fastapi.responses import StreamingResponse, FileResponse
 from detector import AutonomousDecisionSystem
 
 app = FastAPI()
 
+# Enhanced CORS for portability across different laptop IPs
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,26 +18,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "outputs"
+# Use /tmp for cloud deployment (Vercel) but keep local folders for laptops
+# This detects if it's running in a cloud environment
+is_cloud = "VERCEL" in os.environ
+base_dir = "/tmp" if is_cloud else "."
+
+UPLOAD_DIR = os.path.join(base_dir, "uploads")
+OUTPUT_DIR = os.path.join(base_dir, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Mount the output directory so processed images/videos can be viewed
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
-# --- NEW FRONTEND ROUTES ---
+# Initialize the system. Ensure best.pt is in the root folder
+system = AutonomousDecisionSystem(model_path="best.pt")
+
+processing_status = {
+    "is_processing": False, 
+    "progress": 0, 
+    "total_frames": 0, 
+    "current_frame": 0
+}
+
+# --- FRONTEND ROUTES ---
+# These allow Python to serve your HTML directly
 @app.get("/")
 async def serve_landing():
-    return FileResponse("landing.html") # Serves the landing page
+    # Looks for landing.html in the same folder as main.py
+    return FileResponse("landing.html")
 
 @app.get("/index.html")
 async def serve_app():
-    return FileResponse("index.html") # Serves the main app page
-# ---------------------------
+    # Looks for index.html in the same folder as main.py
+    return FileResponse("index.html")
 
-system = AutonomousDecisionSystem(model_path="best.pt")
-
-processing_status = {"is_processing": False, "progress": 0, "total_frames": 0, "current_frame": 0}
+# --- API ENDPOINTS ---
 
 @app.post("/process-media/")
 async def process_media_endpoint(file: UploadFile = File(...)):
@@ -53,7 +70,10 @@ async def process_media_endpoint(file: UploadFile = File(...)):
             output_filename = f"processed_{file_id}.mp4"
             output_path = os.path.join(OUTPUT_DIR, output_filename)
             processing_status.update({"is_processing": True, "progress": 0, "current_frame": 0})
+            
+            # Process the video using the detector logic
             final_decision = system.process_video(input_path, output_path, processing_status)
+            
             processing_status.update({"is_processing": False, "progress": 100})
             media_type = "video"
         else:
@@ -78,7 +98,9 @@ def get_processing_progress():
 
 @app.get("/video_feed")
 def video_feed():
-    return StreamingResponse(system.generate_frames(), media_type='multipart/x-mixed-replace; boundary=frame')
+    # Live webcam feed logic from detector.py
+    return StreamingResponse(system.generate_frames(), 
+                             media_type='multipart/x-mixed-replace; boundary=frame')
 
 @app.post("/stop-feed-signal")
 def stop_feed_signal():
@@ -91,5 +113,6 @@ def get_current_status():
 
 if __name__ == "__main__":
     import uvicorn
+    # 0.0.0.0 makes the server accessible to other laptops on the same Wi-Fi
     print("🚀 Server Ready. Go to http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
